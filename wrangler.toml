@@ -1,15 +1,16 @@
 # Cloudflare Pages: the web app (dist) plus the AI service at /api/ai (functions/).
-# Setup and deploy steps: docs/web-deploy.md.
+# Company setup and deploy steps: docs/web-auth-setup.md.
 name = "takeoff-ai"
 pages_build_output_dir = "dist"
 compatibility_date = "2026-10-01"
 
-# Daily request counts per access code. Create it once:
+# Legacy standalone access-code request counts (company mode uses Postgres).
+# Create only when using the legacy proxy:
 #   npx wrangler kv namespace create USAGE
 # and paste the id it prints here.
-[[kv_namespaces]]
-binding = "USAGE"
-id = "531557e0f27241009a1b4716896fbf04"
+# [[kv_namespaces]]
+# binding = "USAGE"
+# id = "YOUR_NAMESPACE_ID"
 
 [vars]
 # Any OpenAI-compatible endpoint. OpenRouter reaches Gemini, Qwen, GPT, Claude and others with one key.
@@ -19,10 +20,15 @@ AI_BASE_URL = "https://openrouter.ai/api/v1"
 AI_MODEL = "google/gemini-3.8-flash"
 # Cheaper model just for reading sheet names from title blocks.
 AI_MODEL_SHEET_NAME = "google/gemini-3.1-flash-lite"
-# Requests per access code per day, and across everyone per day.
+# Requests per employee per day, and across everyone per day.
 DAILY_LIMIT = "25"
 GLOBAL_DAILY_LIMIT = "200"
+# Company-wide daily cap (also bounded by GLOBAL_DAILY_LIMIT).
+ORG_DAILY_LIMIT = "100"
 
 # Secrets (never in this file):
 #   npx wrangler pages secret put AI_API_KEY      the provider key (OpenRouter)
-#   npx wrangler pages secret put ACCESS_CODES    e.g.  k7Pq2xR9=Joe Drywall;m3Vt8wL4=Sam Ceilings
+#   npx wrangler pages secret put SUPABASE_URL
+#   npx wrangler pages secret put SUPABASE_ANON_KEY
+#   npx wrangler pages secret put SUPABASE_SERVICE_ROLE_KEY
+#   npx wrangler pages secret put APP_URL         exact production HTTPS origin

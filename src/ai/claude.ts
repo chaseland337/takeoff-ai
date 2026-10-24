@@ -9,6 +9,7 @@ const KEY_STORAGE = 'takeoff-ai:anthropic-api-key';
 
 /** The user's own API key, kept in this browser only. */
 export function getApiKey(): string | null {
+  if (import.meta.env.VITE_AI_SERVICE === '1') return null;
   try {
     return localStorage.getItem(KEY_STORAGE);
   } catch {
@@ -17,6 +18,7 @@ export function getApiKey(): string | null {
 }
 
 export function setApiKey(key: string | null): void {
+  if (import.meta.env.VITE_AI_SERVICE === '1') throw new Error('Company model credentials are managed by the server.');
   try {
     if (key) localStorage.setItem(KEY_STORAGE, key);
     else localStorage.removeItem(KEY_STORAGE);

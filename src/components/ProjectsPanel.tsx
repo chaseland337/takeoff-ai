@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { listProjects, storageEstimate, type ProjectSummary } from '../storage';
 import { Icon } from './Icons';
+import { webMode } from '../webAuth';
 
 interface Props {
   currentId: string | undefined;
@@ -32,8 +33,10 @@ const size = (bytes: number) =>
 export function ProjectsPanel({ currentId, persisted, folder, onOpen, onNew, onDelete, onDuplicate, onSaveFile, onOpenFile, onBackupAll }: Props) {
   const [projects, setProjects] = useState<ProjectSummary[] | null>(null);
   const [space, setSpace] = useState<{ usage: number; quota: number } | null>(null);
+  const [error, setError] = useState('');
+  const refresh = () => { setError(''); void listProjects().then((l) => setProjects([...l].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)))).catch((e) => setError(String(e))); };
   useEffect(() => {
-    void listProjects().then((l) => setProjects([...l].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))));
+    refresh();
     void storageEstimate().then(setSpace);
   }, []);
 
@@ -42,17 +45,18 @@ export function ProjectsPanel({ currentId, persisted, folder, onOpen, onNew, onD
       <div className="pop-head">
         <div className="pop-title">Projects</div>
         <div className="pop-sub">
-          {folder ? `Saved on this computer and in ${folder}, for your other computer.` : `Saved in this browser on this computer${persisted ? ', kept until you delete them' : ''}.`}
+          {webMode ? 'Shared securely with your company. Changes are saved online.' : folder ? `Saved on this computer and in ${folder}, for your other computer.` : `Saved in this browser on this computer${persisted ? ', kept until you delete them' : ''}.`}
         </div>
+        {error && <p role="alert">{error} <button onClick={refresh}>Retry</button></p>}
       </div>
       <ul className="project-list">
         {projects === null && <li className="muted project-empty">Loading…</li>}
         {projects?.length === 0 && <li className="muted project-empty">No saved projects yet.</li>}
         {projects?.map((p) => (
           <li key={p.id} className={p.id === currentId ? 'current' : ''}>
-            <button className="project-row" onClick={() => onOpen(p.id)} disabled={p.id === currentId}>
+            <button className="project-row" onClick={() => onOpen(p.id)} disabled={p.id === currentId || p.deleting}>
               <span className="project-name-cell">
-                <span className="project-title">{p.name || 'Untitled project'}</span>
+                <span className="project-title">{p.name || 'Untitled project'}{p.deleting ? ' · Deletion pending' : ''}</span>
                 <span className="project-meta">
                   {when(p.updatedAt)} · {p.sheets} sheet{p.sheets === 1 ? '' : 's'} · {p.takeoffs} takeoff{p.takeoffs === 1 ? '' : 's'} ·{' '}
                   {p.units === 'metric' ? 'metric' : 'imperial'}
@@ -66,7 +70,7 @@ export function ProjectsPanel({ currentId, persisted, folder, onOpen, onNew, onD
                 <span className="open-hint">Open</span>
               )}
             </button>
-            <button className="icon-button small danger" title="Delete project" aria-label={`Delete ${p.name}`} onClick={() => onDelete(p.id)}>
+            <button className="icon-button small danger" title={p.deleting ? 'Resume project deletion' : 'Delete project'} aria-label={`${p.deleting ? 'Resume deletion of' : 'Delete'} ${p.name}`} onClick={() => onDelete(p.id)}>
               <Icon name="trash" size={14} />
             </button>
           </li>

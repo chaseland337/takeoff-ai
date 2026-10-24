@@ -4,8 +4,9 @@
  * `npm run build:web` (VITE_AI_SERVICE=1) use it; the desktop app and local runs don't.
  */
 
+import { accessToken, currentMembership } from '../webAuth';
 export const serviceBuild = import.meta.env.VITE_AI_SERVICE === '1';
-const URL_PATH: string = import.meta.env.VITE_AI_SERVICE_URL || 'api/ai';
+const URL_PATH: string = serviceBuild ? '/api/ai' : import.meta.env.VITE_AI_SERVICE_URL || 'api/ai';
 const CODE_STORAGE = 'takeoff-ai:access-code';
 
 export function getAccessCode(): string | null {
@@ -25,7 +26,7 @@ export function setAccessCode(code: string | null): void {
   }
 }
 
-export const serviceReady = () => serviceBuild && !!getAccessCode();
+export const serviceReady = () => serviceBuild && !!currentMembership();
 
 export class ServiceError extends Error {
   constructor(
@@ -44,6 +45,7 @@ export interface AccessInfo {
 }
 
 async function call(method: 'GET' | 'POST', code: string, body?: unknown, signal?: AbortSignal): Promise<unknown> {
+  if (serviceBuild) code = await accessToken();
   let res: Response;
   try {
     res = await fetch(URL_PATH, {
@@ -62,7 +64,7 @@ async function call(method: 'GET' | 'POST', code: string, body?: unknown, signal
 }
 
 /** Checks a code and returns who it belongs to and today's use. */
-export async function checkAccess(code: string): Promise<AccessInfo> {
+export async function checkAccess(code = ''): Promise<AccessInfo> {
   return (await call('GET', code)) as AccessInfo;
 }
 
@@ -88,8 +90,8 @@ export async function askService<T>(
   request: { task: 'legend' | 'sheet-name'; system?: string; prompt: string; images: string[]; maxTokens?: number },
   signal?: AbortSignal,
 ): Promise<{ json: T; model: string; used: number; limit: number }> {
-  const code = getAccessCode();
-  if (!code) throw new ServiceError('access_code', 'Add your access code in AI settings first.');
+  const code = serviceBuild ? await accessToken() : getAccessCode();
+  if (!code) throw new ServiceError('session', 'Sign in to use company AI.');
   const res = (await call('POST', code, request, signal)) as { text: string; model: string; used: number; limit: number };
   return { json: firstJsonObject(res.text) as T, model: res.model, used: res.used, limit: res.limit };
 }

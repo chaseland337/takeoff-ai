@@ -1,8 +1,8 @@
 # Takeoff AI
 
 An AI-native construction takeoff tool for general contractors. It runs in your
-browser on your own computer: drawings and takeoffs are stored locally and
-nothing is uploaded anywhere.
+browser or as a desktop app. Desktop/local mode keeps drawings on your computer.
+The company web deployment uses employee accounts and private shared projects.
 
 ## Status
 
@@ -126,13 +126,20 @@ undo/redo, and an activity log of every change.
 **Phase 3 — AI takeoff:** walls by type from the plan tags and PDF vector lines,
 rooms with finishes, all as suggestions you accept or correct.
 
-## Use it on the web (for subs)
+## Private company website
 
-The web app runs on Cloudflare Pages with its own AI service at `/api/ai`: subs
-open a URL, enter an access code in **AI settings**, and never need an API key.
-The server holds the model key (any OpenAI-compatible model, OpenRouter by
-default) and caps each code's requests per day. Setup and deploy:
-`docs/web-deploy.md`; deploy with `npm run deploy:web`.
+Employees sign in with email and password, upload PDF drawings, and share saved
+projects with their company. Owners/admins invite employees; there is no public
+signup. Supabase handles accounts, Postgres authorization, and private drawing
+storage. Cloudflare Pages hosts the app and keeps AI keys server-side.
+
+**Start here: [Company web setup and owner checklist](docs/web-auth-setup.md).**
+It includes account setup, database migration, environment variables, deployment,
+password recovery, and a two-company security acceptance checklist.
+
+Build with `npm run build:web`; deploy with `npm run deploy:web` after setup.
+Web mode requires Supabase configuration and does not fall back to access codes
+or browser-only project saving. Desktop and ordinary local builds are unchanged.
 
 ## Use it hosted on claude.ai
 
@@ -143,7 +150,7 @@ in `dist/artifact-files.json` (see `docs/handoff.md`).
 
 ## Run it
 
-Requires Node.js 20 or newer.
+Requires Node.js 22.13 or newer.
 
 ```bash
 npm install
@@ -163,15 +170,17 @@ sheet takes one to three minutes.
 ## Saving, projects and installing
 
 - **Projects:** click the arrow beside the project name. Every project is saved
-  automatically in the browser's database on this computer (IndexedDB), with
+  automatically in the browser's database on this computer in desktop/local mode (IndexedDB), with
   its drawings and its history; the app asks the browser to keep this data
-  permanently. Open, create (metric or imperial) and delete projects there.
+  permanently. In company web mode they save online instead, with private PDFs
+  and conflict detection. Open, create (metric or imperial) and delete projects there.
 - **Project files:** **Save to file…** writes one `.takeoff` file holding the
   project, its history and its drawings, for backups or another computer;
   **Open file…** opens one as a new project.
 - **Install as an app:** when served from a normal web host (see below), Chrome
   and Edge offer to install it (More › Install as an app…) and Safari adds it
-  with File › Add to Dock. It then opens in its own window, works offline, opens
+  with File › Add to Dock. It then opens in its own window, works offline in
+  desktop/local mode (company web projects require internet), opens
   `.takeoff` files and PDFs from Finder (Chrome), and updates itself: when a new
   version is published it shows **Restart** to switch.
 

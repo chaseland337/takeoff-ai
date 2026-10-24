@@ -1,12 +1,14 @@
 /**
  * The AI service for the hosted web app. The browser never holds a model key: it sends
- * the sheet images and prompt here with the user's access code, and this forwards them
+ * the sheet images and prompt here with the user's session, and this forwards them
  * to whichever model is configured (any OpenAI-compatible endpoint: OpenRouter by
  * default, so Gemini Flash, Qwen-VL, GPT or Claude are a config change, not a code change).
  *
- * Each access code has a daily request cap, and there is a cap across all codes, so a
- * free tester can never run up the bill. Counts live in a KV namespace.
+ * Company mode uses atomic per-user/company/global database quotas. Installations
+ * without Supabase retain the legacy access-code/KV mode.
  */
+
+import { companyError, hasCompanyConfig, requireCompanyUser, supabaseUrl, type CompanyEnv, type CompanyUser } from './companyAuth';
 
 /** The slice of Cloudflare's KV namespace this uses (kept local so no Cloudflare types are needed). */
 export interface UsageStore {
@@ -14,7 +16,7 @@ export interface UsageStore {
   put(key: string, value: string, options?: { expirationTtl?: number }): Promise<void>;
 }
 
-export interface Env {
+export interface Env extends CompanyEnv {
   /** Key for the model provider. Set as a secret, never in wrangler.toml. */
   AI_API_KEY?: string;
   /** OpenAI-compatible base URL. Default: OpenRouter. */
@@ -31,6 +33,8 @@ export interface Env {
   DAILY_LIMIT?: string;
   /** Requests across every code per day (UTC). Default 200. */
   GLOBAL_DAILY_LIMIT?: string;
+  /** Requests per company per UTC day. Default 100. */
+  ORG_DAILY_LIMIT?: string;
   USAGE?: UsageStore;
 }
 
@@ -57,6 +61,7 @@ const MAX_IMAGE_CHARS = 8_000_000;
 const MAX_TOTAL_IMAGE_CHARS = 24_000_000;
 const MAX_PROMPT_CHARS = 400_000;
 const MAX_TOKENS = 16_000;
+const MAX_REQUEST_BYTES = 28_000_000;
 const DAY_TTL = 2 * 24 * 3600;
 
 const json = (body: unknown, status = 200) =>
@@ -77,7 +82,7 @@ export function parseCodes(raw: string | undefined): Map<string, string> {
 
 const limitOf = (v: string | undefined, fallback: number) => {
   const n = Number(v);
-  return Number.isFinite(n) && n >= 0 ? Math.floor(n) : fallback;
+  return v !== undefined && v.trim() !== '' && Number.isFinite(n) && n >= 0 ? Math.min(2147483647, Math.floor(n)) : fallback;
 };
 
 const today = (now: Date) => now.toISOString().slice(0, 10);
@@ -98,8 +103,9 @@ function validate(body: unknown): AiRequest | string {
   const b = body as Partial<AiRequest>;
   if (b.task !== 'legend' && b.task !== 'sheet-name') return 'Unknown task.';
   if (typeof b.prompt !== 'string' || !b.prompt) return 'The request has no prompt.';
-  if (b.prompt.length + (b.system?.length ?? 0) > MAX_PROMPT_CHARS) return 'This sheet has too much text to send in one request.';
   if (b.system !== undefined && typeof b.system !== 'string') return 'Bad system prompt.';
+  if (b.prompt.length + (b.system?.length ?? 0) > MAX_PROMPT_CHARS) return 'This sheet has too much text to send in one request.';
+  if (b.maxTokens !== undefined && (typeof b.maxTokens !== 'number' || !Number.isFinite(b.maxTokens) || b.maxTokens <= 0)) return 'Bad token limit.';
   const images = b.images ?? [];
   if (!Array.isArray(images) || images.some((i) => typeof i !== 'string')) return 'Bad images.';
   if (images.length > MAX_IMAGES) return `At most ${MAX_IMAGES} images per request.`;
@@ -109,6 +115,52 @@ function validate(body: unknown): AiRequest | string {
   return { task: b.task, system: b.system, prompt: b.prompt, images, maxTokens: b.maxTokens };
 }
 
+class RequestBodyTooLarge extends Error {}
+
+async function boundedJson(request: Request): Promise<unknown> {
+  const length = request.headers.get('content-length');
+  if (length !== null) {
+    if (!/^\d+$/.test(length)) throw new SyntaxError('Bad content length');
+    if (Number(length) > MAX_REQUEST_BYTES) throw new RequestBodyTooLarge();
+  }
+  const reader = request.body?.getReader();
+  if (!reader) throw new SyntaxError('Missing body');
+  const decoder = new TextDecoder('utf-8', { fatal: true });
+  const parts: string[] = [];
+  // Coalesce tiny stream chunks so their per-string overhead cannot evade the byte cap.
+  const block = new Uint8Array(65_536);
+  let filled = 0;
+  let bytes = 0;
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      bytes += value.byteLength;
+      if (bytes > MAX_REQUEST_BYTES) {
+        throw new RequestBodyTooLarge();
+      }
+      let offset = 0;
+      while (offset < value.byteLength) {
+        const take = Math.min(block.length - filled, value.byteLength - offset);
+        block.set(value.subarray(offset, offset + take), filled);
+        filled += take;
+        offset += take;
+        if (filled === block.length) {
+          parts.push(decoder.decode(block, { stream: true }));
+          filled = 0;
+        }
+      }
+    }
+    parts.push(decoder.decode(block.subarray(0, filled)));
+  } catch (error) {
+    await reader.cancel().catch(() => {});
+    throw error;
+  } finally {
+    reader.releaseLock();
+  }
+  return JSON.parse(parts.join(''));
+}
+
 /**
  * GET: checks an access code and reports today's use (the settings screen calls it).
  * POST: runs one AI request.
@@ -116,38 +168,81 @@ function validate(body: unknown): AiRequest | string {
 export async function handle(request: Request, env: Env, fetchFn: typeof fetch = fetch, now = new Date()): Promise<Response> {
   if (request.method !== 'GET' && request.method !== 'POST') return fail(405, 'method', 'Use GET or POST.');
 
-  const codes = parseCodes(env.ACCESS_CODES);
+  let companyUser: CompanyUser | undefined;
+  let name: string | undefined;
   const code = bearer(request);
-  const name = code ? codes.get(code) : undefined;
-  if (!code || !name) return fail(401, 'access_code', 'That access code is not valid.');
+  if (hasCompanyConfig(env)) {
+    try {
+      companyUser = await requireCompanyUser(request, env, fetchFn);
+      name = companyUser.email;
+    } catch (error) { return companyError(error); }
+  } else {
+    name = code ? parseCodes(env.ACCESS_CODES).get(code) : undefined;
+    if (!code || !name) return fail(401, 'access_code', 'That access code is not valid.');
+  }
 
   const limit = limitOf(env.DAILY_LIMIT, 25);
   const globalLimit = limitOf(env.GLOBAL_DAILY_LIMIT, 200);
   const day = today(now);
   const userKey = `day:${day}:code:${code}`;
   const allKey = `day:${day}:all`;
-  const used = await count(env.USAGE, userKey);
+  let used = companyUser ? 0 : await count(env.USAGE, userKey);
   const model = env.AI_MODEL;
 
-  if (request.method === 'GET') return json({ ok: true, name, used, limit, model: model ?? null });
+  const companyQuota = async (consume: boolean): Promise<{ allowed: boolean; used: number; limit: number; error?: string }> => {
+    if (!env.SUPABASE_SERVICE_ROLE_KEY) throw new Error('Missing quota storage');
+    const response = await fetchFn(`${supabaseUrl(env)}/rest/v1/rpc/company_ai_quota`, {
+      method: 'POST',
+      headers: { apikey: env.SUPABASE_SERVICE_ROLE_KEY, authorization: ['Bearer', env.SUPABASE_SERVICE_ROLE_KEY].join(' '), 'content-type': 'application/json' },
+      body: JSON.stringify({
+        p_user_id: companyUser!.userId, p_user_limit: limit,
+        p_org_limit: limitOf(env.ORG_DAILY_LIMIT, 100), p_global_limit: globalLimit, p_consume: consume,
+      }),
+    });
+    if (!response.ok) throw new Error('Quota unavailable');
+    const quota = await response.json() as { allowed: boolean; used: number; limit: number; error?: string };
+    if (typeof quota.allowed !== 'boolean' || !Number.isSafeInteger(quota.used) || quota.used < 0 || quota.limit !== limit
+      || (consume && quota.allowed && quota.used < 1)) throw new Error('Invalid quota');
+    return quota;
+  };
+
+  if (request.method === 'GET') {
+    if (companyUser) {
+      try { used = (await companyQuota(false)).used; }
+      catch { return fail(503, 'quota_unavailable', 'AI usage accounting is unavailable. Try again later.'); }
+    }
+    return json({ ok: true, name, used, limit, model: model ?? null });
+  }
 
   if (!env.AI_API_KEY || !model) return fail(503, 'not_configured', 'The AI service is not set up yet.');
-  if (used >= limit) return fail(429, 'daily_limit', `You have used today's ${limit} AI requests. Try again tomorrow.`);
-  const usedAll = await count(env.USAGE, allKey);
-  if (usedAll >= globalLimit) return fail(429, 'global_limit', 'The AI service is busy today. Try again tomorrow.');
+  if (!companyUser) {
+    if (used >= limit) return fail(429, 'daily_limit', `You have used today's ${limit} AI requests. Try again tomorrow.`);
+    const usedAll = await count(env.USAGE, allKey);
+    if (usedAll >= globalLimit) return fail(429, 'global_limit', 'The AI service is busy today. Try again tomorrow.');
+  }
 
   let body: unknown;
   try {
-    body = await request.json();
-  } catch {
+    body = await boundedJson(request);
+  } catch (error) {
+    if (error instanceof RequestBodyTooLarge) return fail(413, 'too_large', 'The AI request is too large.');
     return fail(400, 'bad_request', 'The request was not JSON.');
   }
   const req = validate(body);
   if (typeof req === 'string') return fail(400, 'bad_request', req);
 
-  // Counted before the call, so a burst of parallel requests cannot all slip under the cap.
-  await env.USAGE?.put(userKey, String(used + 1), { expirationTtl: DAY_TTL });
-  await env.USAGE?.put(allKey, String(usedAll + 1), { expirationTtl: DAY_TTL });
+  if (companyUser) {
+    try {
+      const quota = await companyQuota(true);
+      if (!quota.allowed) return fail(429, ['daily_limit', 'organization_limit', 'global_limit'].includes(quota.error ?? '') ? quota.error! : 'daily_limit', 'The daily AI request limit has been reached. Try again tomorrow.');
+      used = quota.used - 1;
+    } catch { return fail(503, 'quota_unavailable', 'AI usage accounting is unavailable. Try again later.'); }
+  } else {
+    // Legacy KV mode is retained for installations without company authentication.
+    const usedAll = await count(env.USAGE, allKey);
+    await env.USAGE?.put(userKey, String(used + 1), { expirationTtl: DAY_TTL });
+    await env.USAGE?.put(allKey, String(usedAll + 1), { expirationTtl: DAY_TTL });
+  }
 
   const useModel = req.task === 'sheet-name' ? env.AI_MODEL_SHEET_NAME || model : model;
   const base = (env.AI_BASE_URL || 'https://openrouter.ai/api/v1').replace(/\/+$/, '');
@@ -174,8 +269,7 @@ export async function handle(request: Request, env: Env, fetchFn: typeof fetch =
     return fail(502, 'upstream', 'Could not reach the AI model. Try again.');
   }
   if (!upstream.ok) {
-    const detail = (await upstream.text().catch(() => '')).slice(0, 300);
-    return fail(502, 'upstream', `The AI model returned an error (${upstream.status}). ${detail}`.trim());
+    return fail(502, 'upstream', `The AI model returned an error (${upstream.status}). Try again.`);
   }
   const data = (await upstream.json().catch(() => null)) as {
     model?: string;

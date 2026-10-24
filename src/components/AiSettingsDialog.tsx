@@ -1,25 +1,19 @@
 import { useEffect, useState } from 'react';
 import { getApiKey, MODEL, setApiKey } from '../ai/claude';
-import { checkAccess, getAccessCode, serviceBuild, setAccessCode, type AccessInfo } from '../ai/service';
+import { checkAccess, serviceBuild, type AccessInfo } from '../ai/service';
 
 /** The web app's access code: the server holds the model key and caps each code's daily use. */
 function AccessCodeSection({ onDone }: { onDone: () => void }) {
-  const [code, setCode] = useState(getAccessCode() ?? '');
   const [info, setInfo] = useState<AccessInfo | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [checking, setChecking] = useState(false);
-  const saved = getAccessCode();
 
-  const check = async (c: string, save: boolean) => {
+  const check = async () => {
     setChecking(true);
     setError(null);
     try {
-      const i = await checkAccess(c);
+      const i = await checkAccess();
       setInfo(i);
-      if (save) {
-        setAccessCode(c);
-        onDone();
-      }
     } catch (e) {
       setInfo(null);
       setError(e instanceof Error ? e.message : String(e));
@@ -29,16 +23,13 @@ function AccessCodeSection({ onDone }: { onDone: () => void }) {
   };
 
   useEffect(() => {
-    if (saved) void check(saved, false);
+    void check();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   return (
     <>
-      <label className="stack">
-        Access code
-        <input type="password" autoComplete="off" placeholder="From MMA Construction" value={code} onChange={(e) => setCode(e.target.value)} />
-      </label>
+      <h4>Company AI usage</h4>
       {info && (
         <p className="muted">
           Signed in as {info.name}. {info.used} of {info.limit} AI requests used today.
@@ -46,23 +37,13 @@ function AccessCodeSection({ onDone }: { onDone: () => void }) {
       )}
       {error && <p className="field-hint error">{error}</p>}
       <p className="muted">
-        AI features send only the sheet you choose to the AI model for reading. Your drawings and takeoffs stay on this computer.
+        AI features use your signed-in company account. Model credentials are managed by your company, not stored in this browser. Projects and drawings are shared with company members.
       </p>
       <div className="row-actions">
-        <button className="on" disabled={!code.trim() || checking} onClick={() => void check(code.trim(), true)}>
-          {checking ? 'Checking…' : 'Save'}
+        <button className="on" disabled={checking} onClick={() => void check()}>
+          {checking ? 'Checking…' : 'Refresh usage'}
         </button>
-        {saved && (
-          <button
-            onClick={() => {
-              setAccessCode(null);
-              setCode('');
-              setInfo(null);
-            }}
-          >
-            Remove code
-          </button>
-        )}
+        <button onClick={onDone}>Done</button>
       </div>
     </>
   );

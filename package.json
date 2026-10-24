@@ -2,6 +2,9 @@
   "name": "takeoff-ai",
   "version": "0.1.0",
   "description": "AI-native construction takeoff tool for general contractors",
+  "engines": {
+    "node": ">=22.13.0"
+  },
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
@@ -20,11 +23,12 @@
   "license": "MIT",
   "dependencies": {
     "@anthropic-ai/sdk": "^0.133.0",
+    "@supabase/supabase-js": "^2.118.0",
     "exceljs": "^4.4.0",
     "idb-keyval": "^6.3.0",
     "jszip": "^3.10.2",
     "pdf-lib": "^1.17.1",
-    "pdfjs-dist": "^5.7.284",
+    "pdfjs-dist": "^6.4.299",
     "react": "^19.3.0",
     "react-dom": "^19.3.0",
     "zod": "^4.6.7"
