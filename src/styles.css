@@ -2566,3 +2566,6 @@ button.link-button:hover {
 .access-card .small {
   font-size: 12px;
 }
+.app.company-app { grid-template-rows: auto 52px minmax(0, 1fr); }
+.company-status { grid-column: 1 / -1; display: flex; align-items: center; gap: 8px; padding: 6px 12px; background: var(--panel); border-bottom: 1px solid var(--border); flex-wrap: wrap; }
+.company-status > span { flex: 1; }

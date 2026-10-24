@@ -1,4 +1,8 @@
-import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
+import { companyAccessLocked, webMode } from './webAuth';
+import { activateProjectStorage } from './storage';
+import { cloudStatus, subscribeCloud, reportCloudError, retryCloud, markCloudDirty } from './cloudStorage';
+import { CompanyAccount } from './components/CompanyAccount';
 import { diffProjects, type ActivityEvent } from './activity';
 import { AiAssembliesDialog } from './components/AiAssembliesDialog';
 import { AiSettingsDialog } from './components/AiSettingsDialog';
@@ -107,6 +111,8 @@ function keepVisibility(target: Project, now: Project): Project {
 let mcpWired = false;
 
 export function App() {
+  const onlineStatus = useSyncExternalStore(subscribeCloud, cloudStatus);
+  const [loadError, setLoadError] = useState('');
   const [project, setProject] = useState<Project | null>(null);
   const projectRef = useRef<Project | null>(null);
   /** Writes the activity log still waiting (set below, used before switching projects). */
@@ -233,6 +239,7 @@ export function App() {
       if (data) opened.set(doc.id, await openPdf(data));
     }
     const log = p.id ? await loadActivity(p.id) : [];
+    activateProjectStorage(p);
     past.current = [];
     future.current = [];
     lastCommit.current = null;
@@ -288,7 +295,7 @@ export function App() {
         });
         desktopApi.mcp.register(toolList());
       }
-    })();
+    })().catch((error) => { setLoadError(error instanceof Error ? error.message : String(error)); });
     registerServiceWorker((apply) =>
       setToast({ text: 'A new version of Takeoff AI is ready', undo: false, sticky: true, action: { label: 'Restart', run: apply } }),
     );
@@ -302,7 +309,8 @@ export function App() {
   const previewing = useRef(false);
   useEffect(() => {
     if (!project || previewing.current) return;
-    const t = window.setTimeout(() => void saveProject(project), 400);
+    if (webMode) markCloudDirty(project);
+    const t = window.setTimeout(() => void saveProject(project).catch(reportCloudError), 400);
     return () => window.clearTimeout(t);
   }, [project]);
 
@@ -556,19 +564,30 @@ export function App() {
    * project it is thousands of events, and writing it each keystroke made editing lag.
    */
   const pendingActivity = useRef<{ id: string; events: ActivityEvent[]; timer: number } | null>(null);
+  useEffect(() => {
+    if (!webMode) return;
+    const warn = (event: BeforeUnloadEvent) => {
+      if (cloudStatus().state !== 'online' || pendingActivity.current || (projectRef.current && cloudStatus().state === 'saving')) {
+        event.preventDefault(); event.returnValue = '';
+      }
+    };
+    window.addEventListener('beforeunload', warn);
+    return () => { window.removeEventListener('beforeunload', warn); if (pendingActivity.current) window.clearTimeout(pendingActivity.current.timer); };
+  }, []);
   const flushActivity = useCallback(async () => {
     const p = pendingActivity.current;
     if (!p) return;
-    pendingActivity.current = null;
     window.clearTimeout(p.timer);
+    if (webMode && projectRef.current?.id === p.id) await saveProject(projectRef.current);
     await saveActivity(p.id, p.events);
+    if (pendingActivity.current === p) pendingActivity.current = null;
   }, []);
   flushActivityRef.current = flushActivity;
   const saveActivitySoon = (id: string, events: ActivityEvent[]) => {
     const p = pendingActivity.current;
-    if (p && p.id !== id) void flushActivity();
+    if (p && p.id !== id) void flushActivity().catch(reportCloudError);
     else if (p) window.clearTimeout(p.timer);
-    pendingActivity.current = { id, events, timer: window.setTimeout(() => void flushActivity(), 1200) };
+    pendingActivity.current = { id, events, timer: window.setTimeout(() => void flushActivity().catch(reportCloudError), 1200) };
   };
 
   const record = useCallback((events: ActivityEvent[], replaceBatch?: string) => {
@@ -587,6 +606,7 @@ export function App() {
    */
   const commit = useCallback(
     (fn: (p: Project) => Project, source: string, key?: string) => {
+      if (webMode && cloudStatus().conflict) return;
       const prev = projectRef.current;
       if (!prev) return;
       const next = fn(prev);
@@ -606,6 +626,7 @@ export function App() {
         lastCommit.current = key ? { key, at: now, batch: events[0]?.batch ?? newId() } : null;
       }
       future.current = [];
+      if (webMode) markCloudDirty(next);
       projectRef.current = next;
       setProject(next);
       historyRev.current++;
@@ -615,6 +636,7 @@ export function App() {
   );
 
   const undo = useCallback(() => {
+    if (webMode && (cloudStatus().state === 'failed' || companyAccessLocked())) return;
     const cur = projectRef.current;
     const prev = past.current.pop();
     if (!cur || !prev) return;
@@ -630,6 +652,7 @@ export function App() {
   }, [record]);
 
   const redo = useCallback(() => {
+    if (webMode && (cloudStatus().state === 'failed' || companyAccessLocked())) return;
     const cur = projectRef.current;
     const next = future.current.pop();
     if (!cur || !next) return;
@@ -646,6 +669,7 @@ export function App() {
   // Keyboard: tools, undo and redo. Typing in a field or a dialog is left alone.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      if (webMode && (companyAccessLocked() || cloudStatus().state === 'failed')) return;
       const t = e.target as HTMLElement;
       if (t.closest('input, textarea, select, [contenteditable="true"]') || document.querySelector('.modal-backdrop, .popover')) return;
       const mod = e.metaKey || e.ctrlKey;
@@ -764,7 +788,7 @@ export function App() {
     }
   }
 
-  if (!project) return <div className="loading">Opening your project…</div>;
+  if (!project) return <div className="loading">{loadError ? <><p role="alert">Could not open shared projects: {loadError}</p><button onClick={() => location.reload()}>Retry</button></> : 'Opening your project…'}</div>;
 
   /**
    * Picks a tool. One that measures a kind of type the active one isn't (Fill needs an area
@@ -815,6 +839,7 @@ export function App() {
     const { sheets, noText } = await sheetsOf(pdf, docId, projectRef.current?.units, (n, of) => setBusy(`Reading ${name}: sheet ${n} of ${of}`));
     setPdfs((m) => new Map(m).set(docId, pdf));
     commit((p) => ({ ...p, docs: [...p.docs, { id: docId, name }], sheets: [...p.sheets, ...sheets] }), 'Add drawings');
+    if (webMode && projectRef.current) await saveProject(projectRef.current);
     setSheetId((cur) => cur ?? sheets[0]?.id ?? null);
     return { sheets, noText };
   }
@@ -1046,10 +1071,11 @@ export function App() {
   }
 
   async function removeProject(id: string) {
+    await flush();
     const target = id === project!.id ? project! : await loadProjectById(id);
     if (!target) return;
     const ok = await askConfirm(
-      `Delete “${target.name}” with its drawings, takeoffs and history from this computer? Save it to a file first if you may need it again.`,
+      `Delete “${target.name}” with its drawings, takeoffs and history${webMode ? ' for everyone in your company' : ' from this computer'}? Save it to a file first if you may need it again.`,
       { confirmLabel: 'Delete project', danger: true },
     );
     if (!ok) return;
@@ -1065,7 +1091,7 @@ export function App() {
   async function saveProjectFile() {
     setBusy('Saving the project file…');
     try {
-      await flush();
+      if (!webMode || cloudStatus().state !== 'failed') await flush();
       const { blob, missing } = await writeProjectFile(project!, activityRef.current, async (id) => await loadPdf(id));
       const filename = `${project!.name.replace(/[^\w\- ]+/g, '').trim() || 'takeoff'}.takeoff`;
       const result = await saveFile(filename, blob);
@@ -1141,7 +1167,7 @@ export function App() {
     if (pdfFiles.length) {
       const dt = new DataTransfer();
       pdfFiles.forEach((f) => dt.items.add(f));
-      void upload(dt.files);
+      void upload(dt.files).catch((error) => { setBusy(null); reportCloudError(error); });
     }
   };
 
@@ -2277,7 +2303,13 @@ export function App() {
   };
 
   return (
-    <div className="app">
+    <div className={webMode ? 'app company-app' : 'app'} onClickCapture={(e) => { if (webMode && onlineStatus.state === 'failed' && !(e.target as HTMLElement).closest('.company-status')) { e.preventDefault(); e.stopPropagation(); } }} onKeyDownCapture={(e) => { if (webMode && onlineStatus.state === 'failed' && !(e.target as HTMLElement).closest('.company-status')) { e.preventDefault(); e.stopPropagation(); } }}>
+      {webMode && <div className="company-status" role="status">
+        <span>{onlineStatus.state === 'saving' ? 'Saving to company…' : onlineStatus.state === 'failed' ? `Not saved: ${onlineStatus.error}` : 'Company online · shared projects'}</span>
+        <button disabled={onlineStatus.conflict} onClick={() => { void retryCloud().then((result) => { if (result === 'deleted') location.reload(); else return flushAllRef.current(); }).catch(reportCloudError); }}>Retry / save now</button>
+        {onlineStatus.state === 'failed' && <><button onClick={() => void saveProjectFile().catch(reportCloudError)}>Export unsaved work</button><button onClick={() => { if (window.confirm('Discard unsaved changes and reload the company copy? Export your work first.')) location.reload(); }}>Reload company copy</button></>}
+        <CompanyAccount flush={() => flushAllRef.current()} />
+      </div>}
       <header className="titlebar">
         <input
           ref={projectFileInput}
@@ -2380,7 +2412,7 @@ export function App() {
             multiple
             hidden
             onChange={(e) => {
-              if (e.target.files?.length) void upload(e.target.files);
+              if (e.target.files?.length) void upload(e.target.files).catch((error) => { setBusy(null); reportCloudError(error); });
               e.target.value = '';
             }}
           />
@@ -3006,21 +3038,21 @@ export function App() {
             folder={syncFolder ? folderLabel(syncFolder) : undefined}
             onOpen={(id) => {
               setPopover(null);
-              void switchProject(id);
+              void switchProject(id).catch(reportCloudError);
             }}
             onNew={() => {
               setPopover(null);
               // Same units as the project open now; they can be switched any time (More menu).
-              void startNewProject(project.units);
+              void startNewProject(project.units).catch(reportCloudError);
             }}
-            onDelete={(id) => void removeProject(id)}
+            onDelete={(id) => void removeProject(id).catch(reportCloudError)}
             onDuplicate={() => {
               setPopover(null);
               void duplicateProject();
             }}
             onSaveFile={() => {
               setPopover(null);
-              void saveProjectFile();
+              void saveProjectFile().catch(reportCloudError);
             }}
             onOpenFile={() => {
               setPopover(null);
@@ -3300,7 +3332,7 @@ export function App() {
             ],
             [
               { label: 'Projects…', onSelect: () => setPopover('projects') },
-              { label: 'Save project to file…', onSelect: () => void saveProjectFile() },
+              { label: 'Save project to file…', onSelect: () => void saveProjectFile().catch(reportCloudError) },
               { label: 'Open project file…', onSelect: () => projectFileInput.current?.click() },
               {
                 label: scoringOn() ? 'Hide bid workbook scoring' : 'Show bid workbook scoring',

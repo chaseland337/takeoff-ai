@@ -1,6 +1,9 @@
 import { del, get, set } from 'idb-keyval';
 import type { ActivityEvent } from './activity';
 import { newId, type Project } from './model';
+import { webMode, currentMembership } from './webAuth';
+import { cloudActivate, cloudActivity, cloudCurrent, cloudDelete, cloudDeletePdf, cloudList, cloudLoad, cloudLoadPdf, cloudSave, cloudSaveActivity, cloudSavePdf } from './cloudStorage';
+export const activateProjectStorage = (project: Project) => { if (webMode) cloudActivate(project); };
 
 /**
  * The app's database: IndexedDB in this browser. Each project is stored on its
@@ -24,6 +27,7 @@ export interface ProjectSummary {
   updatedAt: string;
   sheets: number;
   takeoffs: number;
+  deleting?: boolean;
 }
 
 const INDEX = 'projects';
@@ -53,7 +57,7 @@ export const summarize = (p: Project, createdAt?: string, updatedAt?: string): P
   takeoffs: p.measurements.length,
 });
 
-export const listProjects = () => safely(async () => (await get<ProjectSummary[]>(INDEX)) ?? [], [] as ProjectSummary[]);
+export const listProjects = () => webMode ? cloudList() : safely(async () => (await get<ProjectSummary[]>(INDEX)) ?? [], [] as ProjectSummary[]);
 
 /** Moves a project saved by an earlier version (one project under "project") into the index, once. */
 let migration: Promise<void> | null = null;
@@ -75,7 +79,7 @@ async function migrateOnce(): Promise<void> {
 
 /** The project open last (or the most recent one), or nothing when there are none. */
 export const loadCurrentProject = () =>
-  safely(async () => {
+  webMode ? cloudCurrent() : safely(async () => {
     await migrate();
     const index = (await get<ProjectSummary[]>(INDEX)) ?? [];
     const current = await get<string>(CURRENT);
@@ -95,7 +99,7 @@ const known = <T extends Project | undefined>(p: T): T => {
   return p;
 };
 
-export const loadProjectById = (id: string) => safely(async () => known(await get<Project>(projectKey(id))), undefined);
+export const loadProjectById = (id: string) => webMode ? cloudLoad(id) : safely(async () => known(await get<Project>(projectKey(id))), undefined);
 
 /** Told about every project saved with a change, and every project deleted (the desktop app's shared folder). */
 export interface StorageHooks {
@@ -114,7 +118,7 @@ export const setStorageHooks = (h: StorageHooks | null) => {
  * clock, when it was read) and not sent back.
  */
 export const saveProject = (project: Project, opts: { fromFolder?: string } = {}) =>
-  safely(async () => {
+  webMode ? cloudSave(project) : safely(async () => {
     if (!project.id) return;
     const unchanged = !opts.fromFolder && stored.has(project);
     if (!unchanged) {
@@ -138,7 +142,7 @@ export const setSyncMark = (id: string, mark: SyncMark) => safely(() => set(`syn
 
 /** Deletes a project, its activity log and its drawings. */
 export const deleteProject = (project: Project) =>
-  safely(async () => {
+  webMode ? cloudDelete(project) : safely(async () => {
     if (!project.id) return;
     hooks?.deleted(project.id);
     await del(`sync:${project.id}`);
@@ -153,13 +157,13 @@ export const deleteProject = (project: Project) =>
   }, undefined);
 
 export const loadActivity = (projectId: string) =>
-  safely(async () => (await get<ActivityEvent[]>(activityKey(projectId))) ?? [], [] as ActivityEvent[]);
+  webMode ? cloudActivity(projectId) : safely(async () => (await get<ActivityEvent[]>(activityKey(projectId))) ?? [], [] as ActivityEvent[]);
 export const saveActivity = (projectId: string, events: ActivityEvent[]) =>
-  safely(() => set(activityKey(projectId), events.slice(-ACTIVITY_CAP)), undefined);
+  webMode ? cloudSaveActivity(projectId, events) : safely(() => set(activityKey(projectId), events.slice(-ACTIVITY_CAP)), undefined);
 
-export const loadPdf = (docId: string) => safely(() => get<ArrayBuffer>(pdfKey(docId)), undefined);
-export const savePdf = (docId: string, data: ArrayBuffer) => safely(() => set(pdfKey(docId), data), undefined);
-export const deletePdf = (docId: string) => safely(() => del(pdfKey(docId)), undefined);
+export const loadPdf = (docId: string) => webMode ? cloudLoadPdf(docId) : safely(() => get<ArrayBuffer>(pdfKey(docId)), undefined);
+export const savePdf = (docId: string, data: ArrayBuffer) => webMode ? cloudSavePdf(docId, data) : safely(() => set(pdfKey(docId), data), undefined);
+export const deletePdf = (docId: string) => webMode ? cloudDeletePdf(docId) : safely(() => del(pdfKey(docId)), undefined);
 
 /**
  * Asks the browser to keep this app's data even when the disk runs low (otherwise
@@ -176,6 +180,7 @@ export async function persistStorage(): Promise<boolean> {
 
 /** Space used and available for this app's data, in bytes. */
 export async function storageEstimate(): Promise<{ usage: number; quota: number } | null> {
+  if (webMode) return null;
   try {
     const e = await navigator.storage?.estimate?.();
     return e && e.quota ? { usage: e.usage ?? 0, quota: e.quota } : null;
@@ -192,7 +197,8 @@ export interface StarterTypes {
 }
 
 const STARTER = 'starter-types';
-export const loadStarterTypes = () => safely(() => get<StarterTypes>(STARTER), undefined);
+const starterKey = () => webMode ? `${STARTER}:${currentMembership()?.userId ?? 'signed-out'}` : STARTER;
+export const loadStarterTypes = () => safely(() => get<StarterTypes>(starterKey()), undefined);
 export const saveStarterTypes = (units: Project['units'], types: Project['types']) =>
-  safely(() => set(STARTER, { units, types, savedAt: new Date().toISOString() } satisfies StarterTypes), undefined);
-export const clearStarterTypes = () => safely(() => del(STARTER), undefined);
+  safely(() => set(starterKey(), { units, types, savedAt: new Date().toISOString() } satisfies StarterTypes), undefined);
+export const clearStarterTypes = () => safely(() => del(starterKey()), undefined);

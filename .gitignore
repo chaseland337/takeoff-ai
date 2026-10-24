@@ -4,5 +4,8 @@ dist/
 .DS_Store
 release/
 .dev.vars
+.dev.vars.*
+.env.local
+.env.*.local
 .wrangler/
 diag/
