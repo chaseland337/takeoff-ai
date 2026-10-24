@@ -145,7 +145,7 @@ export const cloudSave = (project: Project) => {
   if (!project.id) throw new Error('Project ID is missing.');
   const { organizationId, userId } = context();
   const revision = revisions.get(project.id);
-  if (stored.get(project.id) === project && !project.docs.some((doc) => staged.has(doc.id))) { current = project.id; savedVersion = Math.max(savedVersion, version); return; }
+  if (stored.get(project.id) === project && !project.docs.some((doc) => staged.has(doc.id))) { loadedRevisions.delete(project); current = project.id; savedVersion = Math.max(savedVersion, version); return; }
   if (revision === undefined) {
     // Reserve a row for drawing authorization, without publishing references to not-yet-uploaded PDFs.
     const shell = { ...project, docs: [], sheets: [], measurements: [] };
@@ -158,6 +158,7 @@ export const cloudSave = (project: Project) => {
   const { data } = checked(await supabase().rpc('save_company_project', { p_project_id: project.id, p_expected_revision: expected, p_name: project.name, p_data: project, p_activity: activity }));
   if (!data) throw new ConflictError();
   revisions.set(project.id, Number(data.revision));
+  loadedRevisions.delete(project);
   for (const doc of project.docs) staged.delete(doc.id);
   stored.set(project.id, project); current = project.id;
   savedVersion = Math.max(savedVersion, version);

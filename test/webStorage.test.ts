@@ -31,6 +31,18 @@ import { cloudSave, cloudLoad, cloudSavePdf, cloudLoadPdf, cloudStatus, resetClo
 
 beforeEach(() => { resetCloud(); mocks.results.length = 0; mocks.calls.length = 0; mocks.rpcHook = undefined; vi.clearAllMocks(); });
 describe('company persistence', () => {
+  it('invalidates a fetched activation tag even when saving the same already-stored snapshot', async () => {
+    const project = newProject('metric');
+    mocks.results.push({ data: { data: project, revision: 1 }, error: null });
+    await cloudLoad(project.id!);
+    await cloudSave(project);
+    mocks.results.push({ data: { data: project, name: project.name, activity: [], revision: 1 }, error: null }, { data: { revision: 2 }, error: null });
+    await cloudSaveActivity(project.id!, []);
+    cloudActivate(project);
+    mocks.results.push({ data: { activity: [] }, error: null }, { data: { revision: 3 }, error: null });
+    await cloudSave({ ...project, name: 'after activity and activation' });
+    expect((mocks.calls.filter((call) => call.method === 'rpc').at(-1)!.args[1] as { p_expected_revision: number }).p_expected_revision).toBe(2);
+  });
   it('does not roll back the CAS baseline when opening a new copy after its activity save', async () => {
     const copy = newProject('metric');
     mocks.results.push({ error: null }, { data: { activity: [] }, error: null }, { data: { revision: 2 }, error: null });
